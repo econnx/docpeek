@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DocPeek</title>
+<meta name="description" content="See what your .docx, .xlsx, .pptx or .pdf reveals before you send it. Runs fully in your browser.">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--line:#e3e6eb;--text:#14171c;--muted:#5d6573;--accent:#4f46e5;
+  --bad:#d92d20;--bad-bg:#fdecea;--warn:#b54708;--warn-bg:#fef4e6;--ok:#067647;--ok-bg:#e8f6ee}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0d0f13;--card:#161a21;--line:#262c36;--text:#eef1f5;
+  --muted:#99a2b2;--accent:#8b85ff;--bad:#ff6b5e;--bad-bg:#3a1714;--warn:#f5a524;--warn-bg:#35260f;--ok:#3ccf8e;--ok-bg:#0f2e20}}
+:root[data-theme="dark"]{--bg:#0d0f13;--card:#161a21;--line:#262c36;--text:#eef1f5;--muted:#99a2b2;--accent:#8b85ff;
+  --bad:#ff6b5e;--bad-bg:#3a1714;--warn:#f5a524;--warn-bg:#35260f;--ok:#3ccf8e;--ok-bg:#0f2e20}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif}
+main{max-width:820px;margin:0 auto;padding:48px 16px 64px}
+h1{font-size:40px;margin:0;letter-spacing:-1px}
+h1 span{color:var(--accent)}
+.lead{color:var(--muted);margin:8px 0 28px;font-size:18px}
+#drop{display:block;border:2px dashed var(--line);border-radius:18px;background:var(--card);padding:44px 20px;text-align:center;cursor:pointer;transition:.15s}
+#drop.on,#drop:hover{border-color:var(--accent)}
+#drop b{display:block;font-size:20px;margin-bottom:4px}
+#drop small{color:var(--muted)}
+.priv{margin:12px 0 0;color:var(--muted);font-size:14px;text-align:center}
+#out{margin-top:28px}
+.file{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.file h2{font-size:20px;margin:0;word-break:break-all}
+.score{font-weight:700;border-radius:999px;padding:4px 14px;font-size:14px}
+.item{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-bottom:10px;display:flex;gap:12px}
+.dot{flex:none;width:10px;height:10px;border-radius:50%;margin-top:8px}
+.bad .dot{background:var(--bad)}.warn .dot{background:var(--warn)}.ok .dot{background:var(--ok)}.info .dot{background:var(--muted)}
+.item b{display:block}
+.item p{margin:2px 0 0;color:var(--muted);font-size:14px;word-break:break-word}
+.item code{background:var(--bg);border-radius:6px;padding:1px 6px;font-size:13px}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+button{font:inherit;border:0;border-radius:10px;padding:10px 18px;background:var(--accent);color:#fff;cursor:pointer;font-weight:600}
+button.ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
+footer{margin-top:48px;color:var(--muted);font-size:14px;text-align:center}
+footer a{color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+  <h1>Doc<span>Peek</span></h1>
+  <p class="lead">See what your document says about you before you send it: author name, editing time, hidden text, comments, invisible characters.</p>
+
+  <label id="drop">
+    <input id="pick" type="file" accept=".docx,.xlsx,.pptx,.pdf" multiple hidden>
+    <b>Drop a .docx, .xlsx, .pptx or .pdf</b>
+    <small>or click to choose a file</small>
+  </label>
+  <p class="priv">Your file never leaves your computer. Everything runs in this tab.</p>
+
+  <div id="out"></div>
+
+  <footer>Open source · <a href="https://github.com/econnx/docpeek">github.com/econnx/docpeek</a></footer>
+</main>
+
+<script>
+const ZW = { "​": "zero-width space", "‌": "zero-width non-joiner", "‍": "zero-width joiner",
+             "⁠": "word joiner", "﻿": "zero-width no-break space", "᠎": "Mongolian vowel separator" };
+const ZW_RE = /[​‌‍⁠﻿᠎]/g;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const count = (s, re) => (s.match(re) || []).length;
+
+const drop = document.getElementById("drop"), pick = document.getElementById("pick"), out = document.getElementById("out");
+pick.onchange = () => run([...pick.files]);
+["dragover", "dragenter"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add("on"); }));
+["dragleave", "drop"].forEach(e => drop.addEventListener(e, () => drop.classList.remove("on")));
+drop.addEventListener("drop", ev => { ev.preventDefault(); run([...ev.dataTransfer.files]); });
+
+async function run(files) {
+  out.innerHTML = "";
+  for (const f of files) {
+    const box = document.createElement("section"); out.append(box);
+    try {
+      const ext = f.name.split(".").pop().toLowerCase();
+      const r = ext === "pdf" ? await scanPdf(f) : await scanOoxml(f, ext);
+      render(box, f, r);
+    } catch (e) {
+      box.innerHTML = `<div class="item bad"><span class="dot"></span><div><b>${esc(f.name)}: could not read this file</b><p>${esc(e.message)}</p></div></div>`;
+    }
+  }
+}
+
+// ---------- Office files (they are zip archives of XML)
+function tag(xml, name) {
+  const m = xml.match(new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)</${name}>`));
+  return m ? m[1].trim() : "";
+}
+function textOf(xml) { return xml.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">"); }
+
+async function scanOoxml(file, ext) {
+  const zip = await JSZip.loadAsync(file);
+  const read = p => zip.file(p) ? zip.file(p).async("string") : Promise.resolve("");
+  const find = re => Object.keys(zip.files).filter(p => re.test(p));
+  const items = [], core = await read("docProps/core.xml"), app = await read("docProps/app.xml");
+
+  // who and when
+  const who = [["dc:creator", "Author"], ["cp:lastModifiedBy", "Last saved by"]]
+    .map(([t, l]) => [l, tag(core, t)]).filter(([, v]) => v);
+  if (who.length) items.push(["bad", "Your name is in the file", who.map(([l, v]) => `${l}: <code>${esc(v)}</code>`).join(" · ")]);
+  else items.push(["ok", "No author name", "Author and \"last saved by\" are empty."]);
+  for (const [t, l] of [["Company", "Company"], ["Manager", "Manager"]]) {
+    const v = tag(app, t); if (v) items.push(["bad", `${l} is filled in`, `<code>${esc(v)}</code>`]);
+  }
+  const tpl = tag(app, "Template");
+  if (/[\\/]/.test(tpl)) items.push(["warn", "Template path", `<code>${esc(tpl)}</code> can show your username or folders.`]);
+  const mins = parseInt(tag(app, "TotalTime") || "0", 10), rev = tag(core, "cp:revision");
+  const created = tag(core, "dcterms:created"), modified = tag(core, "dcterms:modified");
+  if (mins || rev > 1) items.push(["info", "Editing history",
+    [mins ? `Total editing time: <code>${mins >= 60 ? Math.floor(mins / 60) + " h " : ""}${mins % 60} min</code>` : "",
+     rev > 1 ? `saved <code>${esc(rev)}</code> times` : ""].filter(Boolean).join(" · ")]);
+  if (created || modified) items.push(["info", "Dates", [created && `Created <code>${esc(created)}</code>`, modified && `modified <code>${esc(modified)}</code>`].filter(Boolean).join(" · ")]);
+  const appName = [tag(app, "Application"), tag(app, "AppVersion")].filter(Boolean).join(" ");
+  if (appName) items.push(["info", "Made with", `<code>${esc(appName)}</code>`]);
+  const custom = await read("docProps/custom.xml"), props = count(custom, /<property\b/g);
+  if (props) items.push(["warn", `${props} custom propert${props > 1 ? "ies" : "y"}`, "Extra fields added by apps or templates (docProps/custom.xml)."]);
+
+  // content parts
+  const parts = ext === "docx" ? find(/^word\/(document|header\d*|footer\d*|footnotes|endnotes)\.xml$/)
+              : ext === "pptx" ? find(/^ppt\/(slides|notesSlides)\/[^/]+\.xml$/)
+              : find(/^xl\/(sharedStrings|worksheets\/[^/]+)\.xml$/);
+  let xml = "";
+  for (const p of parts) xml += await read(p);
+  const text = textOf(xml);
+
+  // invisible characters
+  const zw = text.match(ZW_RE) || [];
+  if (zw.length) {
+    const kinds = {}; zw.forEach(c => kinds[ZW[c]] = (kinds[ZW[c]] || 0) + 1);
+    items.push(["bad", `${zw.length} invisible character${zw.length > 1 ? "s" : ""}`,
+      Object.entries(kinds).map(([k, n]) => `${n} × ${k}`).join(" · ") + ". They can be used to tag or track a text."]);
+  } else items.push(["ok", "No invisible characters", "No zero-width or similar characters in the text."]);
+
+  if (ext === "docx") {
+    const hidden = count(xml, /<w:vanish\/>|<w:vanish w:val="(?:1|true|on)"\/>/g);
+    const white = count(xml, /<w:color w:val="(?:FFFFFF|ffffff)"/g);
+    const tiny = count(xml, /<w:sz w:val="[1-3]"\/>/g);
+    hidden ? items.push(["bad", `${hidden} piece${hidden > 1 ? "s" : ""} of hidden text`, "Text marked as hidden. Word does not show it, but anyone can turn it on."])
+           : items.push(["ok", "No hidden text", ""]);
+    if (white) items.push(["warn", `${white} run${white > 1 ? "s" : ""} of white text`, "White text is invisible on a white page. Fine on a dark background, suspicious otherwise."]);
+    if (tiny) items.push(["warn", `${tiny} run${tiny > 1 ? "s" : ""} of 1-pt text`, "Text so small you cannot see it."]);
+    const ins = count(xml, /<w:ins\b/g), del = count(xml, /<w:del\b/g);
+    if (ins || del) items.push(["bad", "Tracked changes are still inside", `${ins} insertions, ${del} deletions. Deleted text can be read back. Accept or reject all changes before sending.`]);
+    const com = count(await read("word/comments.xml"), /<w:comment\b/g);
+    if (com) items.push(["bad", `${com} comment${com > 1 ? "s" : ""}`, "Comments travel with the file."]);
+    const people = [...(await read("word/people.xml")).matchAll(/w:author="([^"]+)"/g)].map(m => m[1]);
+    if (people.length) items.push(["bad", "Names of people who edited", people.map(p => `<code>${esc(p)}</code>`).join(" ")]);
+  }
+  if (ext === "xlsx") {
+    const wb = await read("xl/workbook.xml");
+    const hs = [...wb.matchAll(/<sheet [^>]*name="([^"]+)"[^>]*state="(hidden|veryHidden)"/g)];
+    if (hs.length) items.push(["bad", "Hidden sheets", hs.map(m => `<code>${esc(m[1])}</code> (${m[2]})`).join(" ")]);
+    const notes = find(/^xl\/comments\d*\.xml$/).length + find(/^xl\/threadedComments\//).length;
+    if (notes) items.push(["bad", "Cell comments", `${notes} comment file(s) inside.`]);
+  }
+  if (ext === "pptx") {
+    const notes = find(/^ppt\/notesSlides\/[^/]+\.xml$/).length;
+    if (notes) items.push(["warn", `Speaker notes on ${notes} slide${notes > 1 ? "s" : ""}`, "People you send the file to can read your notes."]);
+    let hiddenSlides = 0;
+    for (const p of find(/^ppt\/slides\/[^/]+\.xml$/)) if (/<p:sld [^>]*show="0"/.test(await read(p))) hiddenSlides++;
+    if (hiddenSlides) items.push(["bad", `${hiddenSlides} hidden slide${hiddenSlides > 1 ? "s" : ""}`, "Hidden in the slideshow, but still in the file."]);
+    const com = find(/^ppt\/comments\//).length;
+    if (com) items.push(["bad", "Comments", `${com} comment file(s) inside.`]);
+  }
+  const media = find(/\/media\//).length;
+  if (media) items.push(["info", `${media} embedded image${media > 1 ? "s" : ""}`, "Photos can carry their own data (camera, sometimes location)."]);
+
+  return { items, clean: who.length || tag(app, "Company") || tag(app, "Manager") || mins || rev > 1 ? () => cleanOoxml(zip, file.name) : null };
+}
+
+async function cleanOoxml(zip, name) {
+  const blank = (xml, t) => xml.replace(new RegExp(`(<${t}(?:\\s[^>]*)?>)[\\s\\S]*?(</${t}>)`, "g"), "$1$2");
+  let core = await zip.file("docProps/core.xml")?.async("string");
+  if (core) {
+    for (const t of ["dc:creator", "cp:lastModifiedBy", "cp:lastPrinted", "cp:keywords", "dc:description"]) core = blank(core, t);
+    core = core.replace(/(<cp:revision>)[\s\S]*?(<\/cp:revision>)/, "$11$2");
+    zip.file("docProps/core.xml", core);
+  }
+  let app = await zip.file("docProps/app.xml")?.async("string");
+  if (app) {
+    for (const t of ["Company", "Manager"]) app = blank(app, t);
+    app = app.replace(/(<TotalTime>)\d+(<\/TotalTime>)/, "$10$2");
+    zip.file("docProps/app.xml", app);
+  }
+  const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name.replace(/(\.\w+)$/, "-clean$1"); a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+// ---------- PDF
+function pdfString(raw) {
+  if (!raw) return "";
+  if (raw.startsWith("<")) {
+    const hex = raw.slice(1, -1).replace(/\s/g, "");
+    let s = "";
+    if (/^feff/i.test(hex)) for (let i = 4; i + 3 < hex.length; i += 4) s += String.fromCharCode(parseInt(hex.substr(i, 4), 16));
+    else for (let i = 0; i + 1 < hex.length; i += 2) s += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+    return s;
+  }
+  let s = raw.slice(1, -1).replace(/\\([0-7]{1,3}|[()\\nrtbf])/g, (_, c) =>
+    /\d/.test(c) ? String.fromCharCode(parseInt(c, 8)) : ({ n: "\n", r: "\r", t: "\t", b: "\b", f: "\f" })[c] || c);
+  if (s.charCodeAt(0) === 0xFE && s.charCodeAt(1) === 0xFF) {
+    let u = ""; for (let i = 2; i + 1 < s.length; i += 2) u += String.fromCharCode(s.charCodeAt(i) << 8 | s.charCodeAt(i + 1)); s = u;
+  }
+  return s;
+}
+function pdfDate(s) {
+  const m = s.match(/D:(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?/);
+  return m ? `${m[1]}-${m[2] || "01"}-${m[3] || "01"}${m[4] ? ` ${m[4]}:${m[5] || "00"}` : ""}` : s;
+}
+
+async function scanPdf(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let raw = ""; for (let i = 0; i < bytes.length; i += 0x8000) raw += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  const items = [], val = k => {
+    const m = raw.match(new RegExp(`/${k}\\s*(\\((?:\\\\.|[^\\\\)])*\\)|<[0-9A-Fa-f\\s]*>)`));
+    return m ? pdfString(m[1]).trim() : "";
+  };
+  const xmp = (raw.match(/<x:xmpmeta[\s\S]*?<\/x:xmpmeta>/) || [""])[0];
+  const xmpAuthor = (xmp.match(/<dc:creator>[\s\S]*?<rdf:li[^>]*>([^<]*)</) || [])[1] || "";
+  const author = val("Author") || xmpAuthor;
+  author ? items.push(["bad", "Your name is in the file", `Author: <code>${esc(author)}</code>`])
+         : items.push(["ok", "No author name", "No author found in the PDF info or XMP."]);
+  const title = val("Title");
+  if (title) items.push(["warn", "Title field", `<code>${esc(title)}</code>. Often the original file name or a draft name.`]);
+  const tool = [val("Creator"), val("Producer")].filter(Boolean);
+  if (tool.length) items.push(["info", "Made with", tool.map(t => `<code>${esc(t)}</code>`).join(" · ")]);
+  const c = val("CreationDate"), m = val("ModDate");
+  if (c || m) items.push(["info", "Dates", [c && `Created <code>${esc(pdfDate(c))}</code>`, m && `modified <code>${esc(pdfDate(m))}</code>`].filter(Boolean).join(" · ")]);
+  const ann = count(raw, /\/Subtype\s*\/(Text|FreeText|Highlight|Popup)\b/g);
+  if (ann) items.push(["warn", `${ann} annotation${ann > 1 ? "s" : ""}`, "Comments, notes or highlights saved in the PDF."]);
+  if (/\/JavaScript|\/JS\s/.test(raw)) items.push(["bad", "Contains JavaScript", "Unusual for a normal document."]);
+  if (/\/EmbeddedFile/.test(raw)) items.push(["bad", "Has attached files", "Another file is embedded inside this PDF."]);
+  items.push(["info", "Text check skipped", "PDF text is compressed, so invisible characters are not checked here. Check the .docx before exporting."]);
+  return { items, clean: null };
+}
+
+// ---------- output
+function render(box, file, { items, clean }) {
+  const bad = items.filter(i => i[0] === "bad").length, warn = items.filter(i => i[0] === "warn").length;
+  const [label, col] = bad ? [`${bad} thing${bad > 1 ? "s" : ""} to fix`, "bad"] : warn ? ["Mostly clean", "warn"] : ["Clean", "ok"];
+  box.innerHTML = `<div class="file"><h2>${esc(file.name)}</h2>
+      <span class="score" style="background:var(--${col}-bg);color:var(--${col})">${label}</span></div>` +
+    items.map(([lvl, h, p]) => `<div class="item ${lvl}"><span class="dot"></span><div><b>${esc(h)}</b>${p ? `<p>${p}</p>` : ""}</div></div>`).join("");
+  if (clean) {
+    const a = document.createElement("div"); a.className = "actions";
+    const b = document.createElement("button"); b.textContent = "Download a copy without name and editing time";
+    b.onclick = clean; a.append(b); box.append(a);
+  }
+}
+</script>
+</body>
+</html>
